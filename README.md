@@ -1,5 +1,9 @@
 A more ergonomic and more flexible form of thread local storage.
 
+[![Docs Status](https://docs.rs/threadstack/badge.svg)](https://docs.rs/threadstack)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jgarvin/threadstack/blob/main/LICENCE)
+[![crates.io badge](https://img.shields.io/crates/v/threadstack.svg)](https://crates.io/crates/threadstack)
+
 Inspired by the [parameters
 feature](https://docs.racket-lang.org/reference/parameters.html)
 from Racket.
