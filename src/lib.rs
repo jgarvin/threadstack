@@ -1,3 +1,50 @@
+//! A more ergonomic and more flexible form of thread local storage.
+//!
+//! Inspired by the [parameters
+//! feature](https://docs.racket-lang.org/reference/parameters.html)
+//! from Racket.
+//!
+//! The general idea is the following. Many applications have
+//! "context" variables that are needed by almost every module in the
+//! application. It is extremely tedious to pass down these values
+//! through every every function in the program. The obvious
+//! temptation is to use a global variable instead, but global
+//! variables have a bunch of widely known downsides:
+//!
+//! * They lack thread safety
+//!
+//! * They create a hidden side channel between modules in your
+//! application that can create "spooky action at a distance."
+//!
+//! * Because there is only one instance of a global variable modules
+//! in the program can fight over what they want the value of it to
+//! be.
+//!
+//! Threadstacks are a middle ground. Essentially instead of having a
+//! global variable, you keep a thread local stack of values. You can
+//! only refer to the value at the top of the stack, and the borrow
+//! checker will guarantee that your reference goes away before the
+//! value is popped. You can push new values on the stack, but they
+//! automatically expire when the lexical scope containing your push
+//! ends.
+//!
+//! This gives you the effect of a global variable that you can
+//! temporarily override. Functions that before would have referenced
+//! a global variable instead reference the top of the stack, and by
+//! pushing a value on the stack before calling said functions you can
+//! affect their behavior. However you are unable to affect the
+//! behavior when your caller calls those functions because by the
+//! time control returns to your caller the lexical scope containing
+//! your push will have ended and the value you pushed will have
+//! automatically been popped from the stack. This limits the degree
+//! to which different modules can step on each other.
+//!
+//! Because the provided `let_ref_thread_stack_value!` creates
+//! references that have a special lifetime tied to the current stack
+//! frame, it is not necessary to wrap all code using thread stack
+//! values inside a call to something like `my_local_key.with(|data|
+//! {...})` like you would have to with the standard `thread_local!`
+//! TLS implementation.
 //use arr_macro::arr;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -169,6 +216,36 @@ pub unsafe fn get_thread_stack_value_impl<'a, 'b, T>(
     &*t.data.get_unchecked(t.current).as_ptr()
 }
 
+/// Create a local reference to the value at the top of the
+/// threadstack. Even though the top value may have been pushed at a
+/// much higher layer in the call stack, the reference has a
+/// conservative lifetime to guarantee safety -- the same lifetime as
+/// a local variable created on the stack where the macro is invoked.
+/// If you don't want to have to worry about lifetimes consider using
+/// `clone_thread_stack_value` instead.
+///
+/// ```
+/// use threadstack::*;
+///
+/// declare_thread_stacks!(
+///     FOO: String = String::from("hello world");
+/// );
+///
+/// let_ref_thread_stack_value!(my_reference, FOO);
+/// assert!(my_reference == "hello world");
+///
+/// {
+///     push_thread_stack_value!("hello universe".into(), FOO);
+///     let_ref_thread_stack_value!(my_other_reference, FOO);
+///     assert!(my_other_reference == "hello universe");
+/// }
+///
+/// assert!(my_reference == "hello world");
+/// push_thread_stack_value!("hello galaxy".into(), FOO);
+/// assert!(my_reference == "hello world"); // still is reference to old value!
+/// let_ref_thread_stack_value!(my_reference, FOO); // shadows the old reference
+/// assert!(my_reference == "hello galaxy");
+/// ````
 #[macro_export]
 macro_rules! let_ref_thread_stack_value {
     ($new_variable:ident, $thread_stack:expr) => {
@@ -230,7 +307,11 @@ pub fn clone_thread_stack_value<T: Clone>(stack: &'static LocalKey<ThreadStack<T
 /// the value that will be returned by `clone_thread_stack_value` and
 /// that `let_ref_thread_stack_value!` will create a reference to. Can
 /// only be invoked inside a function, and the effect will last until
-/// the end of the current scope.
+/// the end of the current scope. Note that pushing new values will
+/// panic if you go beyond the compile time configured maximum
+/// threadstack size. The assumption is that threadstacks are mostly
+/// used for infrequently set context data, or configuration settings
+/// that would otherwise be global variables.
 ///
 /// ```
 /// use threadstack::*;
