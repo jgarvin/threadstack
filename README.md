@@ -25,12 +25,16 @@ in the program can fight over what they want the value of it to
 be.
 
 Threadstacks are a middle ground. Essentially instead of having a
-global variable, you keep a thread local stack of values. You can
-only refer to the value at the top of the stack, and the borrow
-checker will guarantee that your reference goes away before the
-value is popped. You can push new values on the stack, but they
-automatically expire when the lexical scope containing your push
-ends.
+global variable, you keep a thread local stack of values. You can only
+refer to the value at the top of the stack, and the borrow checker
+will guarantee that your reference goes away before the value is
+popped. You can push new values on the stack, but they automatically
+expire when the lexical scope containing your push ends. Values on the
+threadstack are immutable unless you go out of your way to use a type
+with interior mutability `Cell` or `RefCell`, so code that wants to
+customize the value typically will do so by pushing on onto the stack
+rather than clobbering the existing value as would normally occur with
+a global variable.
 
 This gives you the effect of a global variable that you can
 temporarily override. Functions that before would have referenced
@@ -49,6 +53,8 @@ frame, it is not necessary to wrap all code using thread stack
 values inside a call to something like `my_local_key.with(|data|
 {...})` like you would have to with the standard `thread_local!`
 TLS implementation.
+
+
 
 Example:
 
