@@ -11,7 +11,7 @@
 //! temptation is to use a global variable instead, but global
 //! variables have a bunch of widely known downsides:
 //!
-//! * They lack thread safety
+//! * They lack thread safety.
 //!
 //! * They create a hidden side channel between modules in your
 //! application that can create "spooky action at a distance."
@@ -45,7 +45,6 @@
 //! values inside a call to something like `my_local_key.with(|data|
 //! {...})` like you would have to with the standard `thread_local!`
 //! TLS implementation.
-//use arr_macro::arr;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::thread::LocalKey;
