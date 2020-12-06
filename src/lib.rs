@@ -12,7 +12,7 @@ use std::thread::LocalKey;
 macro_rules! declare_thread_stacks_inner {
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty, $init:expr) => {
         thread_local! {
-            $(#[$attr])* $vis static $name: std::cell::UnsafeCell<$crate::ThreadStack<$t>> = std::cell::UnsafeCell::new ($crate::ThreadStack::new($init));
+            $(#[$attr])* $vis static $name: $crate::ThreadStack<$t> = $crate::ThreadStack::new($init);
         }
     }
 }
@@ -24,6 +24,8 @@ macro_rules! declare_thread_stacks_inner {
 /// # Example
 ///
 /// ```
+///    use threadstack::declare_thread_stacks;
+///
 ///    declare_thread_stacks!(
 ///        FOO: u32 = 0xDEADBEEFu32;
 ///        pub BAR: u32 = 0xDEADBEEFu32;
@@ -51,14 +53,36 @@ macro_rules! declare_thread_stacks {
     );
 }
 
+/// The container for the underlying array used to implement the stack
+/// of values. Generally you will only ever see this type wrapped
+/// inside of `std::thread:LocalKey`, and there is never any reason
+/// really to use it directly. Instead use `declare_thread_stacks!`,
+/// `let_ref_thread_stack_value!`, `push_thread_stack_value!` and
+/// `clone_thread_stack_value`.
 pub struct ThreadStack<T> {
+    #[doc(hidden)]
+    pub inner: UnsafeCell<ThreadStackInner<T>>,
+}
+
+impl<T> ThreadStack<T> {
+    #[doc(hidden)]
+    pub const fn new(initial: T) -> Self {
+        ThreadStack {
+            inner: UnsafeCell::new(ThreadStackInner::new(initial)),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct ThreadStackInner<T> {
     data: [MaybeUninit<T>; 64],
     current: usize,
 }
 
-impl<T> ThreadStack<T> {
+#[doc(hidden)]
+impl<T> ThreadStackInner<T> {
     pub const fn new(initial: T) -> Self {
-        let stack = ThreadStack {
+        let stack = ThreadStackInner {
             data: [
                 // You can't just set the initial value for the whole
                 // array to be MaybeUninit::uninit() because that
@@ -140,7 +164,7 @@ impl<T> ThreadStack<T> {
 #[doc(hidden)]
 pub unsafe fn get_thread_stack_value_impl<'a, 'b, T>(
     _hack: &'a (),
-    t: &'b ThreadStack<T>,
+    t: &'b ThreadStackInner<T>,
 ) -> &'a T {
     &*t.data.get_unchecked(t.current).as_ptr()
 }
@@ -150,13 +174,14 @@ macro_rules! let_ref_thread_stack_value {
     ($new_variable:ident, $thread_stack:expr) => {
         let stack_lifetime_hack = ();
         let $new_variable = $thread_stack.with(|stack| unsafe {
-            $crate::get_thread_stack_value_impl(&stack_lifetime_hack, &*stack.get())
+            $crate::get_thread_stack_value_impl(&stack_lifetime_hack, &*stack.inner.get())
         });
     };
 }
 
+#[doc(hidden)]
 pub struct ThreadStackGuard<'a, T> {
-    stack: *mut ThreadStack<T>,
+    stack: *mut ThreadStackInner<T>,
     stack_lifetime_hack: std::marker::PhantomData<&'a ()>,
 }
 
@@ -164,7 +189,7 @@ pub struct ThreadStackGuard<'a, T> {
 pub unsafe fn push_thread_stack_value_impl<'a, 'b, T>(
     _stack_lifetime_hack: &'a (),
     new_value: T,
-    t: *mut ThreadStack<T>,
+    t: *mut ThreadStackInner<T>,
 ) -> ThreadStackGuard<'a, T> {
     (*t).current += 1;
     (*t).data[(*t).current].as_mut_ptr().write(new_value);
@@ -183,19 +208,52 @@ impl<'a, T> Drop for ThreadStackGuard<'a, T> {
     }
 }
 
-pub fn clone_thread_stack_value<T: Clone>(
-    stack: &'static LocalKey<UnsafeCell<ThreadStack<T>>>,
-) -> T {
+/// Clone the value currently at the top of threadstack. This lets you
+/// avoid worrying about lifetimes but does require a clone to be
+/// made.
+///
+/// ```
+/// use threadstack::*;
+///
+/// declare_thread_stacks!(
+///     FOO: String = String::from("hello world");
+/// );
+///
+/// assert!(clone_thread_stack_value(&FOO) == "hello world");
+/// ````
+pub fn clone_thread_stack_value<T: Clone>(stack: &'static LocalKey<ThreadStack<T>>) -> T {
     let_ref_thread_stack_value!(the_value, stack);
     the_value.clone()
 }
 
+/// Push a new value on the top of the threadstack. this value becomes
+/// the value that will be returned by `clone_thread_stack_value` and
+/// that `let_ref_thread_stack_value!` will create a reference to. Can
+/// only be invoked inside a function, and the effect will last until
+/// the end of the current scope.
+///
+/// ```
+/// use threadstack::*;
+///
+/// declare_thread_stacks!(
+///     FOO: String = String::from("hello world");
+/// );
+///
+/// assert!(clone_thread_stack_value(&FOO) == "hello world");
+///
+/// {
+///     push_thread_stack_value!("hello universe".into(), FOO);
+///     assert!(clone_thread_stack_value(&FOO) == "hello universe");
+/// }
+///
+/// assert!(clone_thread_stack_value(&FOO) == "hello world");
+/// ````
 #[macro_export]
 macro_rules! push_thread_stack_value {
     ($new_value:expr, $thread_stack:expr) => {
         let stack_lifetime_hack = ();
         let _push_guard = $thread_stack.with(|stack| unsafe {
-            push_thread_stack_value_impl(&stack_lifetime_hack, $new_value, stack.get())
+            push_thread_stack_value_impl(&stack_lifetime_hack, $new_value, stack.inner.get())
         });
     };
 }
