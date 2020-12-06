@@ -31,10 +31,10 @@ will guarantee that your reference goes away before the value is
 popped. You can push new values on the stack, but they automatically
 expire when the lexical scope containing your push ends. Values on the
 threadstack are immutable unless you go out of your way to use a type
-with interior mutability `Cell` or `RefCell`, so code that wants to
-customize the value typically will do so by pushing on onto the stack
-rather than clobbering the existing value as would normally occur with
-a global variable.
+with interior mutability like `Cell` or `RefCell`, so code that wants
+to customize the value typically will do so by pushing on onto the
+stack rather than clobbering the existing value as would normally
+occur with a global variable.
 
 This gives you the effect of a global variable that you can
 temporarily override. Functions that before would have referenced
