@@ -86,13 +86,18 @@ macro_rules! declare_thread_stacks_inner {
 ///    declare_thread_stacks!(
 ///        FOO: u32 = 0xDEADBEEFu32;
 ///        pub BAR: u32 = 0xDEADBEEFu32;
+///        BUZZ: String;
 ///    );
 ///
 /// ```
+///
 /// Note that the value on the right side of the equal sign is only
 /// the initial value (which may be overridden by calls to
-/// `push_thread_stack_value`).
-///
+/// `push_thread_stack_value`). Providing an initial value guarantees
+/// that accessing the top of the stack through
+/// `let_ref_thread_stack_value` or `clone_thread_stack_value` will
+/// never panic. Otherwise they may panic if no value has ever been
+/// pushed.
 #[macro_export]
 macro_rules! declare_thread_stacks {
     // empty (base case for the recursion)
