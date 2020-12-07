@@ -253,10 +253,17 @@ pub unsafe fn get_thread_stack_value_impl<'a, 'b, T>(
 macro_rules! let_ref_thread_stack_value {
     ($new_variable:ident, $thread_stack:expr) => {
         let stack_lifetime_hack = ();
-        let $new_variable = $thread_stack.with(|stack| unsafe {
+        let s = &$thread_stack;
+        $crate::compile_time_assert_is_thread_stack(s);
+        let $new_variable = s.with(|stack| unsafe {
             $crate::get_thread_stack_value_impl(&stack_lifetime_hack, &*stack.inner.get())
         });
     };
+}
+
+#[doc(hidden)]
+pub fn compile_time_assert_is_thread_stack<T>(_t: &LocalKey<ThreadStack<T>>) -> () {
+    ()
 }
 
 #[doc(hidden)]
@@ -336,7 +343,9 @@ pub fn clone_thread_stack_value<T: Clone>(stack: &'static LocalKey<ThreadStack<T
 macro_rules! push_thread_stack_value {
     ($new_value:expr, $thread_stack:expr) => {
         let stack_lifetime_hack = ();
-        let _push_guard = $thread_stack.with(|stack| unsafe {
+        let s = &$thread_stack;
+        $crate::compile_time_assert_is_thread_stack(s);
+        let _push_guard = s.with(|stack| unsafe {
             push_thread_stack_value_impl(&stack_lifetime_hack, $new_value, stack.inner.get())
         });
     };
