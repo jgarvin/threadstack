@@ -63,13 +63,13 @@ use std::thread::LocalKey;
 macro_rules! declare_thread_stacks_inner {
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty, $init:expr) => {
         thread_local! {
-            $(#[$attr])* $vis static $name: $crate::ThreadStack<$t> = $crate::ThreadStack::new_with_initial($init);
+            $(#[$attr])* $vis static $name: $crate::ThreadStackWithInitialValue<$t> = $crate::ThreadStackWithInitialValue::new($init);
         }
     };
 
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty) => {
         thread_local! {
-            $(#[$attr])* $vis static $name: $crate::ThreadStack<$t> = $crate::ThreadStack::new_without_initial();
+            $(#[$attr])* $vis static $name: $crate::ThreadStack<$t> = $crate::ThreadStack::new();
         }
     };
 }
@@ -126,21 +126,190 @@ macro_rules! declare_thread_stacks {
     );
 }
 
-/// The container for the underlying array used to implement the stack
-/// of values. Generally you will only ever see this type wrapped
-/// inside of `std::thread:LocalKey`, and there is never any reason
-/// really to use it directly. Instead use `declare_thread_stacks!`,
-/// `let_ref_thread_stack_value!`, `push_thread_stack_value!` and
-/// `clone_thread_stack_value`.
-pub struct ThreadStack<T> {
+// Making this a separate struct lets us have a single
+// ThreadStackGuard struct to handle the cases with and without
+// initial values.
+#[doc(hidden)]
+pub struct ThreadStackInner<T> {
     data: [UnsafeCell<MaybeUninit<T>>; 64],
     current: UnsafeCell<Wrapping<usize>>,
 }
 
+/// The container for the underlying array used to implement the stack
+/// of values when the stack is not given an initial value (for that
+/// see `ThreadStackWithInitialValue`). Generally you will only ever
+/// see this type wrapped inside of `std::thread:LocalKey`, and there
+/// is never any reason really to use it directly. Instead use
+/// `declare_thread_stacks!`, `let_ref_thread_stack_value!`,
+/// `push_thread_stack_value!` and `clone_thread_stack_value`.
+pub struct ThreadStack<T> {
+    inner: ThreadStackInner<T>,
+}
+
+/// The container for the underlying array used to implement the stack
+/// of values, when in the declaration and initial value for the stack
+/// was specified. This is only a separate type from `ThreadStack` so
+/// that a branch and possible panic can be omitted for slightly
+/// better performance and smaller generated code. Generally you will
+/// only ever see this type wrapped inside of `std::thread:LocalKey`,
+/// and there is never any reason really to use it directly. Instead
+/// use `declare_thread_stacks!`, `let_ref_thread_stack_value!`,
+/// `push_thread_stack_value!` and `clone_thread_stack_value`.
+pub struct ThreadStackWithInitialValue<T> {
+    inner: ThreadStackInner<T>,
+}
+
+#[doc(hidden)]
+pub trait IsThreadStack<T> {
+    fn get_data(&self) -> &[UnsafeCell<MaybeUninit<T>>; 64];
+    fn get_current(&self) -> &UnsafeCell<Wrapping<usize>>;
+    fn get_inner(&self) -> &ThreadStackInner<T>;
+
+    unsafe fn push_value_impl<'a, 'b>(
+        &self,
+        _stack_lifetime_hack: &'a (),
+        new_value: T,
+    ) -> ThreadStackGuard<'a, T> {
+        let old_index = *self.get_current().get();
+        *self.get_current().get() = old_index + Wrapping(1);
+        let new_index = *self.get_current().get();
+        let data = &mut *self.get_data()[new_index.0].get();
+        data.as_mut_ptr().write(new_value);
+        ThreadStackGuard {
+            stack: self.get_inner() as *const ThreadStackInner<T>,
+            stack_lifetime_hack: std::marker::PhantomData,
+        }
+    }
+
+    unsafe fn get_value_impl<'a, 'b>(self: &'b Self, _hack: &'a ()) -> &'a T;
+}
+
+impl<T> IsThreadStack<T> for ThreadStack<T> {
+    fn get_data(&self) -> &[UnsafeCell<MaybeUninit<T>>; 64] {
+        &self.inner.data
+    }
+
+    fn get_current(&self) -> &UnsafeCell<Wrapping<usize>> {
+        &self.inner.current
+    }
+
+    fn get_inner(&self) -> &ThreadStackInner<T> {
+        &self.inner
+    }
+
+    unsafe fn get_value_impl<'a, 'b>(self: &'b ThreadStack<T>, _hack: &'a ()) -> &'a T {
+        let index = *self.inner.current.get();
+        let data = &*self.inner.data[index.0].get();
+        &*data.as_ptr()
+    }
+}
+
+impl<T> IsThreadStack<T> for ThreadStackWithInitialValue<T> {
+    fn get_data(&self) -> &[UnsafeCell<MaybeUninit<T>>; 64] {
+        &self.inner.data
+    }
+
+    fn get_current(&self) -> &UnsafeCell<Wrapping<usize>> {
+        &self.inner.current
+    }
+
+    fn get_inner(&self) -> &ThreadStackInner<T> {
+        &self.inner
+    }
+
+    unsafe fn get_value_impl<'a, 'b>(
+        self: &'b ThreadStackWithInitialValue<T>,
+        _hack: &'a (),
+    ) -> &'a T {
+        let index = *self.inner.current.get();
+
+        // Because with this type we know for sure we had an initial
+        // value, we don't have to check when we index.
+        let data = &*self.inner.data.get_unchecked(index.0).get();
+
+        &*data.as_ptr()
+    }
+}
+
 impl<T> ThreadStack<T> {
+    pub const fn new() -> Self {
+        let stack = ThreadStackInner {
+            data: [
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+                UnsafeCell::new(MaybeUninit::uninit()),
+            ],
+            current: UnsafeCell::new(Wrapping(usize::MAX)),
+        };
+        ThreadStack { inner: stack }
+    }
+}
+
+impl<T> ThreadStackWithInitialValue<T> {
     #[doc(hidden)]
-    pub const fn new_with_initial(initial: T) -> Self {
-        let stack = ThreadStack {
+    pub const fn new(initial: T) -> Self {
+        let stack = ThreadStackInner {
             data: [
                 // You can't just set the initial value for the whole
                 // array to be MaybeUninit::uninit() because that
@@ -215,91 +384,8 @@ impl<T> ThreadStack<T> {
             ],
             current: UnsafeCell::new(Wrapping(0)),
         };
-        stack
+        ThreadStackWithInitialValue { inner: stack }
     }
-
-    pub const fn new_without_initial() -> Self {
-        let stack = ThreadStack {
-            data: [
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-            ],
-            current: UnsafeCell::new(Wrapping(usize::MAX)),
-        };
-        stack
-    }
-}
-
-#[doc(hidden)]
-pub unsafe fn get_thread_stack_value_impl<'a, 'b, T>(
-    _hack: &'a (),
-    t: &'b ThreadStack<T>,
-) -> &'a T {
-    let index = *t.current.get();
-    let data = &*t.data[index.0].get();
-    &*data.as_ptr()
 }
 
 /// Create a local reference to the value at the top of the
@@ -342,38 +428,19 @@ macro_rules! let_ref_thread_stack_value {
         let stack_lifetime_hack = ();
         let s = &$thread_stack;
         $crate::compile_time_assert_is_thread_stack(s);
-        let $new_variable = s.with(|stack| unsafe {
-            $crate::get_thread_stack_value_impl(&stack_lifetime_hack, stack)
-        });
+        let $new_variable = s.with(|stack| unsafe { stack.get_value_impl(&stack_lifetime_hack) });
     };
 }
 
 #[doc(hidden)]
-pub fn compile_time_assert_is_thread_stack<T>(_t: &LocalKey<ThreadStack<T>>) -> () {
+pub fn compile_time_assert_is_thread_stack<U, T: IsThreadStack<U>>(_t: &LocalKey<T>) -> () {
     ()
 }
 
 #[doc(hidden)]
 pub struct ThreadStackGuard<'a, T> {
-    stack: *const ThreadStack<T>,
+    stack: *const ThreadStackInner<T>,
     stack_lifetime_hack: std::marker::PhantomData<&'a ()>,
-}
-
-#[doc(hidden)]
-pub unsafe fn push_thread_stack_value_impl<'a, 'b, T>(
-    _stack_lifetime_hack: &'a (),
-    new_value: T,
-    t: &ThreadStack<T>,
-) -> ThreadStackGuard<'a, T> {
-    let old_index = *t.current.get();
-    *t.current.get() = Wrapping(old_index.0 + 1);
-    let new_index = *t.current.get();
-    let data = &mut *t.data[new_index.0].get();
-    data.as_mut_ptr().write(new_value);
-    ThreadStackGuard {
-        stack: t as *const ThreadStack<T>,
-        stack_lifetime_hack: std::marker::PhantomData,
-    }
 }
 
 impl<'a, T> Drop for ThreadStackGuard<'a, T> {
@@ -383,7 +450,7 @@ impl<'a, T> Drop for ThreadStackGuard<'a, T> {
         let data = unsafe { &mut *stack.data[old_index.0].get() };
         let old = unsafe { std::ptr::drop_in_place(data.as_mut_ptr()) };
         std::mem::drop(old);
-        unsafe { *stack.current.get() = Wrapping(old_index.0 - 1) };
+        unsafe { *stack.current.get() = old_index - Wrapping(1) };
     }
 }
 
@@ -400,7 +467,7 @@ impl<'a, T> Drop for ThreadStackGuard<'a, T> {
 ///
 /// assert!(clone_thread_stack_value(&FOO) == "hello world");
 /// ````
-pub fn clone_thread_stack_value<T: Clone>(stack: &'static LocalKey<ThreadStack<T>>) -> T {
+pub fn clone_thread_stack_value<T: Clone, U: IsThreadStack<T>>(stack: &'static LocalKey<U>) -> T {
     let_ref_thread_stack_value!(the_value, stack);
     the_value.clone()
 }
@@ -437,9 +504,8 @@ macro_rules! push_thread_stack_value {
         let stack_lifetime_hack = ();
         let s = &$thread_stack;
         $crate::compile_time_assert_is_thread_stack(s);
-        let _push_guard = s.with(|stack| unsafe {
-            push_thread_stack_value_impl(&stack_lifetime_hack, $new_value, stack)
-        });
+        let _push_guard =
+            s.with(|stack| unsafe { stack.push_value_impl(&stack_lifetime_hack, $new_value) });
     };
 }
 
@@ -474,5 +540,32 @@ mod tests {
     fn no_initial_value_test() {
         let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
         assert!(wont_work == &100);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn revert_to_no_initial() {
+        {
+            push_thread_stack_value!(50, STARTS_EMPTY);
+        }
+        let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
+        assert!(wont_work == &100);
+    }
+
+    #[test]
+    fn it_works_no_initial() {
+        {
+            push_thread_stack_value!(50, STARTS_EMPTY);
+            let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
+            assert!(stack_value == &50);
+        }
+        push_thread_stack_value!(51, STARTS_EMPTY);
+        let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
+        assert!(stack_value == &51);
+        assert!(clone_thread_stack_value(&STARTS_EMPTY) == 51);
+        push_thread_stack_value!(52, STARTS_EMPTY);
+        let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
+        assert!(stack_value == &52);
+        assert!(clone_thread_stack_value(&STARTS_EMPTY) == 52);
     }
 }
