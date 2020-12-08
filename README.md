@@ -58,7 +58,7 @@ TLS implementation.
 
 Example:
 
-```
+```rust
 use threadstack::*;
 
 declare_thread_stacks!(
