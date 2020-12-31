@@ -49,8 +49,8 @@
 //! values inside a call to something like `my_local_key.with(|data|
 //! {...})` like you would have to with the standard `thread_local!`
 //! TLS implementation.
-use std::cell::Cell;
-use std::ptr;
+use rel_ptr::RelPtr;
+use std::cell::UnsafeCell;
 use std::thread::LocalKey;
 
 // This is done as a separate macro because it is not possible to hide
@@ -62,12 +62,7 @@ use std::thread::LocalKey;
 macro_rules! declare_thread_stacks_inner {
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty, $init:expr) => {
         thread_local! {
-            $(#[$attr])* $vis static $name: $crate::ThreadStackWithInitialValue<$t> = {
-                thread_local! {
-                    static INITIAL: $t = $init;
-                }
-                INITIAL.with(|x| $crate::ThreadStackWithInitialValue::new(x as *const $t))
-            }
+            $(#[$attr])* $vis static $name: $crate::ThreadStackWithInitialValue<$t> = $crate::ThreadStackWithInitialValue::new($init)
         }
     };
 
@@ -135,7 +130,7 @@ macro_rules! declare_thread_stacks {
 // initial values.
 #[doc(hidden)]
 pub struct ThreadStackInner<T> {
-    top: Cell<*const T>,
+    top: UnsafeCell<RelPtr<T>>,
 }
 
 /// The container for the underlying array used to implement the stack
@@ -160,6 +155,7 @@ pub struct ThreadStack<T> {
 /// `push_thread_stack_value!` and `clone_thread_stack_value`.
 pub struct ThreadStackWithInitialValue<T> {
     inner: ThreadStackInner<T>,
+    initial: T,
 }
 
 #[doc(hidden)]
@@ -168,8 +164,9 @@ pub trait IsThreadStack<T> {
 
     unsafe fn push_value_impl<'a>(&self, new_value: &'a T) -> ThreadStackGuard<'a, T> {
         let inner = self.get_inner();
-        let old_top = inner.top.get();
-        inner.top.set(new_value as *const T);
+        let top: &mut RelPtr<T> = &mut *inner.top.get();
+        let old_top: RelPtr<T> = *top;
+        top.set_unchecked((new_value as *const T) as *mut T);
         ThreadStackGuard {
             previous_top: old_top,
             stack: self.get_inner() as *const ThreadStackInner<T>,
@@ -186,11 +183,11 @@ impl<T> IsThreadStack<T> for ThreadStack<T> {
     }
 
     unsafe fn get_value_impl<'a, 'b>(self: &'b ThreadStack<T>, _hack: &'a ()) -> &'a T {
-        let p = self.inner.top.get();
+        let p: &RelPtr<T> = &*self.inner.top.get();
         if p.is_null() {
             panic!("Tried to access threadstack with no initial value and no set value!");
         }
-        &*p
+        p.as_ref_unchecked()
     }
 }
 
@@ -205,15 +202,18 @@ impl<T> IsThreadStack<T> for ThreadStackWithInitialValue<T> {
     ) -> &'a T {
         // Because we were defined with an initial value we know we
         // can always dereference this pointer.
-        &*self.inner.top.get()
+        let p: &RelPtr<T> = &*self.inner.top.get();
+        p.as_ref_unchecked()
     }
 }
 
 impl<T> ThreadStack<T> {
-    pub const fn new() -> Self {
+    // This function should be able to be const but can't be because
+    // RelPtr::null() is not const.
+    pub fn new() -> Self {
         ThreadStack {
             inner: ThreadStackInner {
-                top: Cell::new(ptr::null()),
+                top: UnsafeCell::new(RelPtr::null()),
             },
         }
     }
@@ -224,12 +224,18 @@ impl<T> ThreadStackWithInitialValue<T> {
     // but can't be because of:
     // https://github.com/rust-lang/rust/issues/69908
     #[doc(hidden)]
-    pub fn new(initial: *const T) -> Self {
-        ThreadStackWithInitialValue {
+    pub fn new(initial: T) -> Self {
+        let mut s = ThreadStackWithInitialValue {
             inner: ThreadStackInner {
-                top: Cell::new(initial),
+                top: UnsafeCell::new(RelPtr::null()),
             },
+            initial,
+        };
+        let top: &mut RelPtr<T> = unsafe { &mut *s.inner.top.get() };
+        unsafe {
+            top.set_unchecked(&mut s.initial as *mut T);
         }
+        return s;
     }
 }
 
@@ -284,7 +290,7 @@ pub fn compile_time_assert_is_thread_stack<U, T: IsThreadStack<U>>(_t: &LocalKey
 
 #[doc(hidden)]
 pub struct ThreadStackGuard<'a, T> {
-    previous_top: *const T,
+    previous_top: RelPtr<T>, // not valid to dereference from here, just a backup!
     stack: *const ThreadStackInner<T>,
     stack_lifetime_hack: std::marker::PhantomData<&'a ()>,
 }
@@ -292,7 +298,9 @@ pub struct ThreadStackGuard<'a, T> {
 impl<'a, T> Drop for ThreadStackGuard<'a, T> {
     fn drop(&mut self) {
         let stack = unsafe { &*self.stack };
-        stack.top.set(self.previous_top);
+        unsafe {
+            *stack.top.get() = self.previous_top;
+        }
     }
 }
 
