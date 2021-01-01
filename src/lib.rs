@@ -278,7 +278,9 @@ macro_rules! let_ref_thread_stack_value {
         let stack_lifetime_hack = ();
         let s = &$thread_stack;
         $crate::compile_time_assert_is_thread_stack(s);
-        let $new_variable = s.with(|stack| unsafe { stack.get_value_impl(&stack_lifetime_hack) });
+        let $new_variable = s.with(|stack| unsafe {
+            $crate::IsThreadStack::get_value_impl(stack, &stack_lifetime_hack)
+        });
     };
 }
 
