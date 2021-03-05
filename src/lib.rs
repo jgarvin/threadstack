@@ -367,18 +367,38 @@ mod tests {
         STACK: u32 = 0xDEADBEEFu32;
     );
 
+    // We don't want to have any assumptions about how many threads
+    // are being used to run tests, so we spawn a separate thread for
+    // every test.
+    fn run_test<F: FnOnce() -> () + Send + 'static>(f: F) {
+        let handle = std::thread::spawn(f);
+
+        if let Err(v) = handle.join() {
+            if v.downcast_ref::<&str>().is_some() {
+                // fresh panic
+                panic!("{}", v.downcast_ref::<&str>().unwrap());
+            } else if v.downcast_ref::<String>().is_some() {
+                // already went through formatting panic
+                panic!("{}", v.downcast_ref::<String>().unwrap());
+            }
+        }
+    }    
+    
     #[test]
     fn it_works() {
-        let_ref_thread_stack_value!(stack_value, STACK);
-        assert!(stack_value == &0xDEADBEEFu32);
-        {
-            push_thread_stack_value!(stack_value + 1, STACK);
+        run_test(|| {
+
             let_ref_thread_stack_value!(stack_value, STACK);
-            assert!(stack_value == &0xDEADBEF0u32);
-        }
-        let_ref_thread_stack_value!(stack_value, STACK);
-        assert!(stack_value == &0xDEADBEEFu32);
-        assert!(clone_thread_stack_value(&STACK) == 0xDEADBEEFu32);
+            assert!(stack_value == &0xDEADBEEFu32);
+            {
+                push_thread_stack_value!(stack_value + 1, STACK);
+                let_ref_thread_stack_value!(stack_value, STACK);
+                assert!(stack_value == &0xDEADBEF0u32);
+            }
+            let_ref_thread_stack_value!(stack_value, STACK);
+            assert!(stack_value == &0xDEADBEEFu32);
+            assert!(clone_thread_stack_value(&STACK) == 0xDEADBEEFu32);
+        });
     }
 
     declare_thread_stacks!(
@@ -388,34 +408,40 @@ mod tests {
     #[test]
     #[should_panic(expected = "no initial value")]
     fn no_initial_value_test() {
-        let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
-        assert!(wont_work == &100);
+        run_test(|| {
+            let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
+            assert!(wont_work == &100);
+        });
     }
 
     #[test]
     #[should_panic(expected = "no initial value")]
     fn revert_to_no_initial() {
-        {
-            push_thread_stack_value!(50, STARTS_EMPTY);
-        }
-        let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
-        assert!(wont_work == &100);
+        run_test(|| {
+            {
+                push_thread_stack_value!(50, STARTS_EMPTY);
+            }
+            let_ref_thread_stack_value!(wont_work, STARTS_EMPTY);
+            assert!(wont_work == &100);
+        });
     }
 
     #[test]
     fn it_works_no_initial() {
-        {
-            push_thread_stack_value!(50, STARTS_EMPTY);
+        run_test(|| {
+            {
+                push_thread_stack_value!(50, STARTS_EMPTY);
+                let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
+                assert!(stack_value == &50);
+            }
+            push_thread_stack_value!(51, STARTS_EMPTY);
             let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
-            assert!(stack_value == &50);
-        }
-        push_thread_stack_value!(51, STARTS_EMPTY);
-        let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
-        assert!(stack_value == &51);
-        assert!(clone_thread_stack_value(&STARTS_EMPTY) == 51);
-        push_thread_stack_value!(52, STARTS_EMPTY);
-        let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
-        assert!(stack_value == &52);
-        assert!(clone_thread_stack_value(&STARTS_EMPTY) == 52);
+            assert!(stack_value == &51);
+            assert!(clone_thread_stack_value(&STARTS_EMPTY) == 51);
+            push_thread_stack_value!(52, STARTS_EMPTY);
+            let_ref_thread_stack_value!(stack_value, STARTS_EMPTY);
+            assert!(stack_value == &52);
+            assert!(clone_thread_stack_value(&STARTS_EMPTY) == 52);
+        });
     }
 }
